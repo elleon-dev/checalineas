@@ -2,6 +2,10 @@
   publish = "public"
   functions = "netlify/functions"
 
+[[edge_functions]]
+  path = "/api/consultar"
+  function = "consultar"
+
 [[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/api/:splat"

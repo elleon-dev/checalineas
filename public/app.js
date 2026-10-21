@@ -1,4 +1,5 @@
 const STORAGE_KEY = 'osiptel_consultas_historial_v1';
+const PERU_RELAY_URL = 'https://8d39a8d6e88f0d.lhr.life';
 const LOCAL_BRIDGE_URL = 'http://localhost:3000';
 
 let resultados = loadResultados();
@@ -208,27 +209,30 @@ async function parseXlsxInBrowser(arrayBuffer) {
 }
 
 /* ============================================================================
-   SMART API CLIENT (Auto-fallback to localhost:3000 Peru IP if on Netlify)
+   SMART API CLIENT (Peruvian Exit Relay + Netlify Edge + Localhost Bridge)
 ============================================================================ */
 async function consultarDocumentoSmart(doc) {
   const isLocalhost =
     window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-  // If opened on Netlify (e.g. checalineas.netlify.app), prefer local bridge first
-  // because OSIPTEL (.gob.pe) blocks US cloud datacenter IPs (Geo-IP Peru only).
+  const savedRelay = (localStorage.getItem('osiptel_peru_relay_url') || PERU_RELAY_URL).replace(/\/+$/, '');
+
   const endpoints = isLocalhost
-    ? ['/api/consultar']
-    : [`${LOCAL_BRIDGE_URL}/api/consultar`, '/api/consultar'];
+    ? ['/api/consultar', `${savedRelay}/api/consultar`]
+    : ['/api/consultar', `${savedRelay}/api/consultar`, `${LOCAL_BRIDGE_URL}/api/consultar`];
 
   let lastResult = null;
-  let lastError = null;
 
   for (const url of endpoints) {
     try {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tipoDoc: 'auto', numeroDocumento: doc })
+        body: JSON.stringify({
+          tipoDoc: 'auto',
+          numeroDocumento: doc,
+          peruRelayUrl: savedRelay
+        })
       });
       if (!response.ok) continue;
       const json = await response.json();
@@ -236,16 +240,12 @@ async function consultarDocumentoSmart(doc) {
         return json;
       }
       lastResult = json;
-    } catch (err) {
-      lastError = err;
+    } catch (_) {
+      // Try next endpoint in fallback chain
     }
   }
 
   if (lastResult) {
-    if (String(lastResult.error || '').includes('socket hang up')) {
-      lastResult.error =
-        'OSIPTEL bloquea servidores fuera de Perú (Netlify EE.UU.). Abre http://localhost:3000 o mantén "npm start" activo en tu Mac.';
-    }
     return lastResult;
   }
 
@@ -254,7 +254,7 @@ async function consultarDocumentoSmart(doc) {
     tipoDocNombre: /^\d{11}$/.test(doc) ? 'RUC' : (/^\d{8}$/.test(doc) ? 'DNI' : 'DOC'),
     numeroDocumento: doc,
     totalLineas: 0,
-    error: 'Servidor local apagado. Ejecuta "npm start" en tu terminal para conectar con OSIPTEL.'
+    error: 'No se pudo conectar con el nodo Perú para consultar OSIPTEL.'
   };
 }
 
@@ -435,7 +435,10 @@ async function consultarDocumentos(docs = []) {
 async function downloadExport(endpoint, payload, fallbackName) {
   const isLocalhost =
     window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-  const urls = isLocalhost ? [endpoint] : [endpoint, `${LOCAL_BRIDGE_URL}${endpoint}`];
+  const savedRelay = (localStorage.getItem('osiptel_peru_relay_url') || PERU_RELAY_URL).replace(/\/+$/, '');
+  const urls = isLocalhost
+    ? [endpoint, `${savedRelay}${endpoint}`]
+    : [`${savedRelay}${endpoint}`, endpoint, `${LOCAL_BRIDGE_URL}${endpoint}`];
 
   for (const urlStr of urls) {
     try {
