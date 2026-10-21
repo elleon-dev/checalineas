@@ -1,6 +1,6 @@
 const OSIPTEL_BASE_URL = 'https://checatuslineas.osiptel.gob.pe/';
 const OSIPTEL_ENDPOINT = 'https://checatuslineas.osiptel.gob.pe/Consultas/GetAllCabeceraConsulta/';
-const DEFAULT_PERU_RELAY = 'https://afe1236320683303-190-236-202-110.serveousercontent.com';
+const DEFAULT_PERU_RELAY = 'https://fa0516058b027d65-190-236-202-110.serveousercontent.com';
 
 const TIPO_DOC_LABELS = {
   '1': 'DNI',

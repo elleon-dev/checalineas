@@ -12,7 +12,9 @@ const osiptelAgent = new https.Agent({
   keepAlive: true,
   maxSockets: 1,
   keepAliveMsecs: 15000,
-  rejectUnauthorized: false
+  rejectUnauthorized: false,
+  minVersion: 'TLSv1.2',
+  maxVersion: 'TLSv1.2'
 });
 
 let sessionCookies = '';
@@ -24,8 +26,8 @@ function sleep(ms) {
 }
 
 function ensureSessionCookies() {
-  if (sessionCookies) return Promise.resolve(sessionCookies);
-  return new Promise((resolve) => {
+  if (sessionCookies) return Promise.resolve({ cookies: sessionCookies, fresh: false });
+  return new Promise((resolve, reject) => {
     const urlObj = new URL(OSIPTEL_BASE_URL);
     const req = https.request(
       {
@@ -35,6 +37,9 @@ function ensureSessionCookies() {
         method: 'GET',
         agent: osiptelAgent,
         rejectUnauthorized: false,
+        minVersion: 'TLSv1.2',
+        maxVersion: 'TLSv1.2',
+        servername: urlObj.hostname,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -47,13 +52,17 @@ function ensureSessionCookies() {
           sessionCookies = setCookie.map((c) => c.split(';')[0]).join('; ');
         }
         res.resume();
-        res.on('end', () => resolve(sessionCookies));
+        res.on('end', () => {
+          if (!sessionCookies) {
+            return reject(new Error('OSIPTEL no entregó cookie de sesión (WAF en enfriamiento).'));
+          }
+          resolve({ cookies: sessionCookies, fresh: true });
+        });
       }
     );
-    req.on('error', () => resolve(''));
-    req.setTimeout(10000, () => {
-      req.destroy();
-      resolve('');
+    req.on('error', (err) => reject(err));
+    req.setTimeout(12000, () => {
+      req.destroy(new Error('Tiempo de espera agotado al iniciar sesión con OSIPTEL'));
     });
     req.end();
   });
@@ -86,6 +95,9 @@ function rawPostOsiptel(urlStr, formBody) {
         method: 'POST',
         agent: osiptelAgent,
         rejectUnauthorized: false,
+        minVersion: 'TLSv1.2',
+        maxVersion: 'TLSv1.2',
+        servername: urlObj.hostname,
         headers
       },
       (res) => {
@@ -108,6 +120,7 @@ function rawPostOsiptel(urlStr, formBody) {
           try {
             resolve(JSON.parse(text));
           } catch (err) {
+            sessionCookies = '';
             reject(new Error('Respuesta inválida de OSIPTEL'));
           }
         });
@@ -134,13 +147,15 @@ function postOsiptelRequest(urlStr, formBody) {
     let lastErr;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await ensureSessionCookies();
+        const { fresh } = await ensureSessionCookies();
+        if (fresh) {
+          await sleep(600);
+        }
         lastRequestTime = Date.now();
         return await rawPostOsiptel(urlStr, formBody);
       } catch (err) {
         lastErr = err;
-        sessionCookies = '';
-        await sleep(1800 * attempt);
+        await sleep(2200 * attempt);
       }
     }
     throw lastErr;
@@ -1121,15 +1136,20 @@ const server = http.createServer(async (req, res) => {
 
 function startPersistentTunnel(port) {
   const { spawn } = require('node:child_process');
+  const keyPath = path.join(__dirname, '.serveo_key');
   const connectTunnel = () => {
-    const ssh = spawn('ssh', [
+    const sshArgs = [
       '-o', 'StrictHostKeyChecking=no',
       '-o', 'ServerAliveInterval=20',
       '-o', 'ServerAliveCountMax=3',
-      '-o', 'ExitOnForwardFailure=yes',
-      '-R', `80:localhost:${port}`,
-      'serveo.net'
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      '-o', 'ExitOnForwardFailure=yes'
+    ];
+    if (fs.existsSync(keyPath)) {
+      sshArgs.push('-i', keyPath, '-o', 'IdentitiesOnly=yes');
+    }
+    sshArgs.push('-R', `80:localhost:${port}`, 'serveo.net');
+
+    const ssh = spawn('ssh', sshArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
 
     ssh.stdout.on('data', (chunk) => {
       const text = chunk.toString();
