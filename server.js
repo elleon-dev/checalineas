@@ -1100,8 +1100,19 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`==========================================================`);
-  console.log(`🚀 Servidor Consulta OSIPTEL corriendo en: http://localhost:${PORT}`);
-  console.log(`==========================================================`);
-});
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`==========================================================`);
+    console.log(`🚀 Servidor Consulta OSIPTEL corriendo en: http://localhost:${PORT}`);
+    console.log(`==========================================================`);
+  });
+}
+
+module.exports = {
+  consultarOsiptel,
+  parseXlsxDocuments,
+  buildExcelFromResultados,
+  buildCsvBuffer,
+  TIPO_DOC_LABELS
+};
+
