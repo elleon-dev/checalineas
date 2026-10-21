@@ -1,4 +1,5 @@
 const STORAGE_KEY = 'osiptel_consultas_historial_v1';
+const LOCAL_BRIDGE_URL = 'http://localhost:3000';
 
 let resultados = loadResultados();
 let expandedRows = new Set();
@@ -67,6 +68,194 @@ function parseInputDocuments(rawText = '') {
     .filter(t => t.length >= 6 && /^[A-Z0-9]+$/.test(t) && !/^(RUC|DNI|DOCUMENTO|NUMERO|TIPO)$/.test(t));
 
   return Array.from(new Set(tokens));
+}
+
+/* ============================================================================
+   CLIENT-SIDE .XLSX PARSER (Zero server roundtrip needed for Excel import)
+============================================================================ */
+async function parseXlsxInBrowser(arrayBuffer) {
+  const view = new DataView(arrayBuffer);
+  const bytes = new Uint8Array(arrayBuffer);
+
+  let eocdOffset = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset === -1) {
+    throw new Error('El archivo no es un Excel (.xlsx) válido.');
+  }
+
+  const totalEntries = view.getUint16(eocdOffset + 10, true);
+  let cdOffset = view.getUint32(eocdOffset + 16, true);
+  const entries = new Map();
+  const decoder = new TextDecoder('utf-8');
+
+  for (let i = 0; i < totalEntries && cdOffset + 46 <= bytes.length; i++) {
+    if (view.getUint32(cdOffset, true) !== 0x02014b50) break;
+    const compressionMethod = view.getUint16(cdOffset + 10, true);
+    const compressedSize = view.getUint32(cdOffset + 20, true);
+    const fileNameLen = view.getUint16(cdOffset + 28, true);
+    const extraLen = view.getUint16(cdOffset + 30, true);
+    const commentLen = view.getUint16(cdOffset + 32, true);
+    const localHeaderOffset = view.getUint32(cdOffset + 42, true);
+
+    const fileName = decoder.decode(bytes.subarray(cdOffset + 46, cdOffset + 46 + fileNameLen));
+
+    if (
+      (fileName === 'xl/sharedStrings.xml' || /^xl\/worksheets\/sheet\d+\.xml$/i.test(fileName)) &&
+      localHeaderOffset + 30 <= bytes.length
+    ) {
+      const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+      const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+      const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+      const compressedSlice = bytes.subarray(dataStart, dataStart + compressedSize);
+
+      if (compressionMethod === 0) {
+        entries.set(fileName, decoder.decode(compressedSlice));
+      } else if (compressionMethod === 8 && typeof DecompressionStream !== 'undefined') {
+        const ds = new DecompressionStream('deflate-raw');
+        const writer = ds.writable.getWriter();
+        writer.write(compressedSlice);
+        writer.close();
+        const decompressedBuf = await new Response(ds.readable).arrayBuffer();
+        entries.set(fileName, decoder.decode(decompressedBuf));
+      }
+    }
+
+    cdOffset += 46 + fileNameLen + extraLen + commentLen;
+  }
+
+  const decodeEntities = (str) =>
+    String(str || '')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, '&');
+
+  const sharedStrings = [];
+  const ssXml = entries.get('xl/sharedStrings.xml');
+  if (ssXml) {
+    const siRegex = /<si\b[^>]*>([\s\S]*?)<\/si>/g;
+    let siMatch;
+    while ((siMatch = siRegex.exec(ssXml)) !== null) {
+      const inner = siMatch[1];
+      const tRegex = /<t\b[^>]*>([\s\S]*?)<\/t>/g;
+      let tMatch;
+      let combined = '';
+      while ((tMatch = tRegex.exec(inner)) !== null) {
+        combined += decodeEntities(tMatch[1]);
+      }
+      sharedStrings.push(combined.trim());
+    }
+  }
+
+  const rawValues = [];
+  const sheetKeys = Array.from(entries.keys())
+    .filter(k => /^xl\/worksheets\/sheet\d+\.xml$/i.test(k))
+    .sort();
+
+  for (const key of sheetKeys) {
+    const xml = entries.get(key);
+    const cellRegex = /<c\b([^>]*)>([\s\S]*?)<\/c>/g;
+    let cellMatch;
+    while ((cellMatch = cellRegex.exec(xml)) !== null) {
+      const attrs = cellMatch[1] || '';
+      const inner = cellMatch[2] || '';
+      const typeMatch = attrs.match(/\bt="([^"]+)"/);
+      const cellType = typeMatch ? typeMatch[1] : 'n';
+
+      let val = '';
+      if (cellType === 's') {
+        const vMatch = inner.match(/<v\b[^>]*>([\s\S]*?)<\/v>/);
+        if (vMatch) {
+          val = sharedStrings[parseInt(vMatch[1].trim(), 10)] ?? '';
+        }
+      } else if (cellType === 'inlineStr') {
+        const tMatch = inner.match(/<t\b[^>]*>([\s\S]*?)<\/t>/);
+        if (tMatch) val = decodeEntities(tMatch[1]);
+      } else {
+        const vMatch = inner.match(/<v\b[^>]*>([\s\S]*?)<\/v>/);
+        if (vMatch) {
+          const rawV = decodeEntities(vMatch[1]).trim();
+          if (/^\d+(\.\d+)?e[+-]?\d+$/i.test(rawV)) {
+            const num = Number(rawV);
+            val = Number.isFinite(num) ? Math.round(num).toString() : rawV;
+          } else if (/^\d+\.0+$/.test(rawV)) {
+            val = rawV.replace(/\.0+$/, '');
+          } else {
+            val = rawV;
+          }
+        }
+      }
+
+      const cleaned = String(val || '').trim().toUpperCase().replace(/\s+/g, '');
+      if (
+        cleaned.length >= 8 &&
+        cleaned.length <= 20 &&
+        /^[A-Z0-9]+$/.test(cleaned) &&
+        !/^(RUC|DNI|DOCUMENTO|DOCUMENTOS|NRO|NUMERO|TIPO)$/.test(cleaned)
+      ) {
+        rawValues.push(cleaned);
+      }
+    }
+  }
+
+  return Array.from(new Set(rawValues));
+}
+
+/* ============================================================================
+   SMART API CLIENT (Auto-fallback to localhost:3000 Peru IP if on Netlify)
+============================================================================ */
+async function consultarDocumentoSmart(doc) {
+  const isLocalhost =
+    window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+  // If opened on Netlify (e.g. checalineas.netlify.app), prefer local bridge first
+  // because OSIPTEL (.gob.pe) blocks US cloud datacenter IPs (Geo-IP Peru only).
+  const endpoints = isLocalhost
+    ? ['/api/consultar']
+    : [`${LOCAL_BRIDGE_URL}/api/consultar`, '/api/consultar'];
+
+  let lastResult = null;
+  let lastError = null;
+
+  for (const url of endpoints) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tipoDoc: 'auto', numeroDocumento: doc })
+      });
+      if (!response.ok) continue;
+      const json = await response.json();
+      if (json && json.ok) {
+        return json;
+      }
+      lastResult = json;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  if (lastResult) {
+    if (String(lastResult.error || '').includes('socket hang up')) {
+      lastResult.error =
+        'OSIPTEL bloquea servidores fuera de Perú (Netlify EE.UU.). Abre http://localhost:3000 o mantén "npm start" activo en tu Mac.';
+    }
+    return lastResult;
+  }
+
+  return {
+    ok: false,
+    tipoDocNombre: /^\d{11}$/.test(doc) ? 'RUC' : (/^\d{8}$/.test(doc) ? 'DNI' : 'DOC'),
+    numeroDocumento: doc,
+    totalLineas: 0,
+    error: 'Servidor local apagado. Ejecuta "npm start" en tu terminal para conectar con OSIPTEL.'
+  };
 }
 
 function getOperatorClass(name = '') {
@@ -228,27 +417,11 @@ async function consultarDocumentos(docs = []) {
     progressCounter.textContent = `${done + 1} / ${docs.length}`;
     progressFill.style.width = `${Math.round((done / docs.length) * 100)}%`;
 
-    try {
-      const res = await fetch('/api/consultar', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tipoDoc: 'auto', numeroDocumento: doc })
-      }).then(r => r.json());
-
-      if (docs.length === 1 && res.totalLineas > 0) {
-        expandedRows.add(res.numeroDocumento);
-      }
-
-      upsertResultado(res);
-    } catch (err) {
-      upsertResultado({
-        ok: false,
-        tipoDocNombre: 'DOC',
-        numeroDocumento: doc,
-        totalLineas: 0,
-        error: err.message
-      });
+    const res = await consultarDocumentoSmart(doc);
+    if (docs.length === 1 && res.totalLineas > 0) {
+      expandedRows.add(res.numeroDocumento);
     }
+    upsertResultado(res);
 
     done += 1;
     progressFill.style.width = `${Math.round((done / docs.length) * 100)}%`;
@@ -260,29 +433,36 @@ async function consultarDocumentos(docs = []) {
 }
 
 async function downloadExport(endpoint, payload, fallbackName) {
-  try {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) throw new Error('Error al generar archivo');
-    const blob = await res.blob();
-    const disp = res.headers.get('Content-Disposition') || '';
-    const match = disp.match(/filename="([^"]+)"/);
-    const filename = match ? match[1] : fallbackName;
+  const isLocalhost =
+    window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  const urls = isLocalhost ? [endpoint] : [endpoint, `${LOCAL_BRIDGE_URL}${endpoint}`];
 
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  } catch (err) {
-    alert(err.message);
+  for (const urlStr of urls) {
+    try {
+      const res = await fetch(urlStr, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) continue;
+      const blob = await res.blob();
+      const disp = res.headers.get('Content-Disposition') || '';
+      const match = disp.match(/filename="([^"]+)"/);
+      const filename = match ? match[1] : fallbackName;
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      return;
+    } catch (_) {}
   }
+
+  alert('No se pudo generar el archivo de exportación.');
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -310,20 +490,8 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       let docs = [];
       if (name.endsWith('.xlsx')) {
-        const base64 = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(new Error('No se pudo leer el archivo'));
-          reader.readAsDataURL(file);
-        });
-        const res = await fetch('/api/importar-excel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fileBase64: base64 })
-        }).then(r => r.json());
-
-        if (!res.ok) throw new Error(res.error || 'Archivo Excel inválido');
-        docs = res.documentos || [];
+        const arrayBuf = await file.arrayBuffer();
+        docs = await parseXlsxInBrowser(arrayBuf);
       } else {
         const text = await file.text();
         docs = parseInputDocuments(text);
@@ -346,13 +514,11 @@ document.addEventListener('DOMContentLoaded', () => {
     abortFlag = true;
   });
 
-  // Clear list buttons (header + summary bar)
   document.getElementById('btnLimpiarTodo').addEventListener('click', limpiarListaCompleta);
   document.getElementById('btnLimpiarSecundario').addEventListener('click', limpiarListaCompleta);
 
   document.getElementById('inputFiltroTabla').addEventListener('input', renderAll);
 
-  // Row click to expand/collapse or remove individual row
   document.getElementById('tbodyResultados').addEventListener('click', (e) => {
     const removeBtn = e.target.closest('[data-remove]');
     if (removeBtn) {

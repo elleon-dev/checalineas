@@ -977,9 +977,17 @@ function readJsonBody(req) {
   });
 }
 
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, X-Requested-With',
+  'Access-Control-Allow-Private-Network': 'true'
+};
+
 function sendJson(res, statusCode, payload) {
   const body = Buffer.from(JSON.stringify(payload), 'utf8');
   res.writeHead(statusCode, {
+    ...CORS_HEADERS,
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': body.length,
     'Cache-Control': 'no-store'
@@ -999,8 +1007,17 @@ const MIME_TYPES = {
 
 const server = http.createServer(async (req, res) => {
   try {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS_HEADERS);
+      return res.end();
+    }
+
     const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const pathname = urlObj.pathname;
+
+    if (req.method === 'GET' && pathname === '/api/health') {
+      return sendJson(res, 200, { ok: true, mode: 'local-peru' });
+    }
 
     // API: Single query
     if (req.method === 'POST' && pathname === '/api/consultar') {
@@ -1047,6 +1064,7 @@ const server = http.createServer(async (req, res) => {
       const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
 
       res.writeHead(200, {
+        ...CORS_HEADERS,
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'Content-Disposition': `attachment; filename="reporte-osiptel-${timestamp}.xlsx"`,
         'Content-Length': xlsxBuffer.length
@@ -1063,6 +1081,7 @@ const server = http.createServer(async (req, res) => {
       const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
 
       res.writeHead(200, {
+        ...CORS_HEADERS,
         'Content-Type': 'text/csv; charset=utf-8',
         'Content-Disposition': `attachment; filename="reporte-osiptel-${modo}-${timestamp}.csv"`,
         'Content-Length': csvBuffer.length
