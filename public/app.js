@@ -1,5 +1,5 @@
 const STORAGE_KEY = 'osiptel_consultas_historial_v1';
-const PERU_RELAY_URL = 'https://8d39a8d6e88f0d.lhr.life';
+const PERU_RELAY_URL = 'https://afe1236320683303-190-236-202-110.serveousercontent.com';
 const LOCAL_BRIDGE_URL = 'http://localhost:3000';
 
 let resultados = loadResultados();

@@ -1,5 +1,6 @@
+const OSIPTEL_BASE_URL = 'https://checatuslineas.osiptel.gob.pe/';
 const OSIPTEL_ENDPOINT = 'https://checatuslineas.osiptel.gob.pe/Consultas/GetAllCabeceraConsulta/';
-const DEFAULT_PERU_RELAY = 'https://8d39a8d6e88f0d.lhr.life';
+const DEFAULT_PERU_RELAY = 'https://afe1236320683303-190-236-202-110.serveousercontent.com';
 
 const TIPO_DOC_LABELS = {
   '1': 'DNI',
@@ -112,7 +113,25 @@ export default async (request) => {
       }
     }
 
-    // 2. Fallback: Direct Edge fetch to OSIPTEL
+    // 2. Fallback: Direct Edge fetch to OSIPTEL (with initial session cookie handshake)
+    let cookieHeader = '';
+    try {
+      const initRes = await fetch(OSIPTEL_BASE_URL, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        }
+      });
+      const rawCookie = initRes.headers.get('set-cookie') || '';
+      if (rawCookie) {
+        cookieHeader = rawCookie
+          .split(/,(?=\s*[A-Za-z0-9_-]+=)/)
+          .map(c => c.split(';')[0].trim())
+          .join('; ');
+      }
+    } catch (_) {}
+
     const payload = buildOsiptelPayload({
       idTipoDoc,
       numeroDocumento,
@@ -121,16 +140,21 @@ export default async (request) => {
       draw: 1
     });
 
+    const reqHeaders = {
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'X-Requested-With': 'XMLHttpRequest',
+      'Origin': 'https://checatuslineas.osiptel.gob.pe',
+      'Referer': 'https://checatuslineas.osiptel.gob.pe/',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+      'Accept': 'application/json, text/javascript, */*; q=0.01'
+    };
+    if (cookieHeader) {
+      reqHeaders['Cookie'] = cookieHeader;
+    }
+
     const response = await fetch(OSIPTEL_ENDPOINT, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Origin': 'https://checatuslineas.osiptel.gob.pe',
-        'Referer': 'https://checatuslineas.osiptel.gob.pe/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/javascript, */*; q=0.01'
-      },
+      headers: reqHeaders,
       body: payload
     });
 
@@ -211,11 +235,12 @@ export default async (request) => {
     );
   } catch (err) {
     const cleaned = String(rawNumero || '').trim();
+    const inferredLabel = /^\d{11}$/.test(cleaned) ? 'RUC' : (/^\d{8}$/.test(cleaned) ? 'DNI' : 'DOC');
     return new Response(
       JSON.stringify({
         ok: false,
         idTipoDoc: tipoDoc,
-        tipoDocNombre: TIPO_DOC_LABELS[tipoDoc] || 'DOCUMENTO',
+        tipoDocNombre: TIPO_DOC_LABELS[tipoDoc] || inferredLabel,
         numeroDocumento: cleaned,
         totalLineas: 0,
         operadorPrincipal: 'Error',

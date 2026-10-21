@@ -1119,11 +1119,44 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+function startPersistentTunnel(port) {
+  const { spawn } = require('node:child_process');
+  const connectTunnel = () => {
+    const ssh = spawn('ssh', [
+      '-o', 'StrictHostKeyChecking=no',
+      '-o', 'ServerAliveInterval=20',
+      '-o', 'ServerAliveCountMax=3',
+      '-o', 'ExitOnForwardFailure=yes',
+      '-R', `80:localhost:${port}`,
+      'serveo.net'
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    ssh.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      const match = text.match(/https:\/\/[a-zA-Z0-9.-]+\.serveousercontent\.com/);
+      if (match) {
+        console.log(`🌐 Nodo Perú HTTPS Activo: ${match[0]}`);
+      }
+    });
+
+    ssh.on('close', () => {
+      setTimeout(connectTunnel, 3000);
+    });
+
+    ssh.on('error', () => {
+      setTimeout(connectTunnel, 5000);
+    });
+  };
+
+  connectTunnel();
+}
+
 if (require.main === module) {
   server.listen(PORT, () => {
     console.log(`==========================================================`);
     console.log(`🚀 Servidor Consulta OSIPTEL corriendo en: http://localhost:${PORT}`);
     console.log(`==========================================================`);
+    startPersistentTunnel(PORT);
   });
 }
 
