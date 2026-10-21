@@ -1,0 +1,13 @@
+{
+  "name": "consulta-osiptel-app",
+  "version": "1.0.0",
+  "description": "Aplicación web para consultar líneas y operadores móviles en OSIPTEL (Checa tus líneas) por RUC o DNI con soporte individual, masivo y exportación a Excel (.xlsx) y CSV.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
